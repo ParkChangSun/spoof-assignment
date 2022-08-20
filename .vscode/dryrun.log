@@ -1,0 +1,11 @@
+make --dry-run --keep-going --print-directory
+make: Entering directory '/home/park/network/spoof-assignment'
+g++    -c -o main.o main.cpp
+g++    -c -o arphdr.o arphdr.cpp
+g++    -c -o ethhdr.o ethhdr.cpp
+g++    -c -o ip.o ip.cpp
+g++    -c -o mac.o mac.cpp
+g++    -c -o send.o send.cpp
+g++     main.o arphdr.o ethhdr.o ip.o mac.o send.o  -lpcap -o arp-spoof
+make: Leaving directory '/home/park/network/spoof-assignment'
+ 
