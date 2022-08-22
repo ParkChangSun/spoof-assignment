@@ -10,8 +10,6 @@ struct EthArpPacket
 
     static EthArpPacket spoofDefaultPacket();
     static EthArpPacket broadcastPacket(Mac attackerMac, Ip attackerIp, Ip destIp);
-    // frommac tomac toip fromip??
-    // src dest
     static EthArpPacket infectPacket(Mac attackerMac, Mac senderMac, Ip senderIp, Ip targetIp);
 
     void send(pcap_t *handle);
@@ -21,6 +19,20 @@ struct EthArpPacket
 void getDeviceAddress(const char *dev, Ip *ip, Mac *mac);
 void usage();
 Mac receiveArpReply(pcap_t *handle, Ip ip_from, int *receivedFlag);
-void spoof(pcap_t *handle, Ip destIp, Mac atkMac, Mac destMac);
+
+struct SpoofParams
+{
+    pcap_t *handle;
+    Mac amac;
+    Mac smac;
+    Mac dmac;
+};
+void *spoof(void *param);
+
+struct ProduceParam
+{
+    pcap_t *handle;
+    Mac attackerMac;
+};
 void *producePacket(void *handle);
-void registerIp(Ip ip, pthread_cond_t *cond, pthread_mutex_t *mutex);
+void registerMac(Mac mac, pthread_cond_t *cond, pthread_mutex_t *mutex);
