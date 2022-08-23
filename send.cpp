@@ -39,8 +39,8 @@ void getDeviceAddress(const char *dev, Ip *ip, Mac *mac)
 
 void usage()
 {
-    printf("syntax : arp-spoof<interface><sender ip 1><target ip 1>[<sender ip 2><target ip 2>...]");
-    printf("sample : arp-spoof wlan0 192.168.10.2 192.168.10.1 192.168.10.1 192.168.10.2");
+    printf("syntax : arp-spoof<interface><sender ip 1><target ip 1>[<sender ip 2><target ip 2>...]\n");
+    printf("sample : arp-spoof wlan0 192.168.10.2 192.168.10.1 192.168.10.1 192.168.10.2\n");
 }
 
 EthArpPacket EthArpPacket::spoofDefaultPacket()
@@ -200,15 +200,6 @@ void *spoof(void *param)
         free(packet);
     }
 }
-
-// unused
-//  std::set<Ip> ips;
-//  void registerIp(Ip ip)
-//  {
-//      ips.insert(ip);
-//  }
-
-// register mutex and cond on queue?
 
 // thread 1 : pthread_mutex_lock(&mutex);
 // while (!condition)
